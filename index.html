@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Roll Call — a daily roll call for Agent ID holders</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  button { padding: .6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  .muted { color: #666; font-size: .9rem; }
+  #status { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h1>Agent Roll Call</h1>
+<p>
+  A daily roll call for Agent ID holders. If your wallet holds an Agent ID,
+  you can sign today's roll call once per UTC day. The contract keeps your
+  check-in count and day streak — nothing else.
+</p>
+
+<div class="card">
+  <p><strong>How it works</strong></p>
+  <ul>
+    <li>Connect <em>your own</em> wallet with the button below (injected wallet in your browser / wallet app).</li>
+    <li>If it holds an Agent ID, press <strong>Check in today</strong> and confirm the transaction in your own wallet.</li>
+    <li>Checking in moves <strong>no funds</strong>, asks for <strong>no token approval</strong>, and cannot be done for you by this page or anyone else. You only pay the normal network gas for that one transaction.</li>
+  </ul>
+  <p class="muted">
+    This page never asks for a seed phrase, private key, pairing code, or QR-code login,
+    and there is no sign-in session stored anywhere. There are no returns, rewards, or
+    earnings promised or implied by checking in. This is not a trading product.
+  </p>
+</div>
+
+<div class="card">
+  <p>Total check-ins: <strong id="totalCheckIns">—</strong></p>
+  <p>Distinct Agent ID addresses checked in: <strong id="uniqueAgents">—</strong></p>
+  <p>Your address: <strong id="myAddress">not connected</strong></p>
+  <p>Holds an Agent ID: <strong id="myIsHolder">—</strong></p>
+  <p>Your check-ins: <strong id="myCount">—</strong> · Current streak: <strong id="myStreak">—</strong> day(s) · Best streak: <strong id="myBest">—</strong></p>
+  <p>Checked in today: <strong id="myToday">—</strong></p>
+  <p>
+    <button id="connectBtn">Connect my wallet</button>
+    <button id="checkInBtn" disabled>Check in today</button>
+  </p>
+  <p id="status" class="muted"></p>
+</div>
+
+<p class="muted">
+  Network: BNB Chain (chain id 56). Roll-call contract:
+  <span id="contractAddr">(paste the deployed, BscScan-verified address in CONFIG below)</span><br>
+  Agent ID registry (read-only gate): 0x60B9262456dE011F7d15a54CdD8c48bAaa8B022F
+</p>
+
+<!-- ethers v6, used only to talk to the user's own injected wallet and to read public contract state -->
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script>
+"use strict";
+
+// ---- CONFIG: fill in after deployment + BscScan verification (see DESIGN.md) ----
+const CONFIG = {
+  chainId: 56, // BNB Chain mainnet
+  contractAddress: "0xd6d3f3f41ee421e256583e0333f792cd128bdc24",
+  agentIdRegistry: "0x60B9262456dE011F7d15a54CdD8c48bAaa8B022F"
+};
+
+const ROLL_CALL_ABI = [
+  "function checkIn() external",
+  "function totalCheckIns() view returns (uint256)",
+  "function uniqueAgents() view returns (uint256)",
+  "function getStats(address account) view returns (bool isHolder, uint256 checkInCount, uint256 streak, uint256 bestStreak, uint256 lastDay, bool checkedInToday)"
+];
+const REGISTRY_ABI = ["function balanceOf(address account) view returns (uint256)"];
+
+const $ = (id) => document.getElementById(id);
+const status = (msg) => { $("status").textContent = msg; };
+
+let provider = null;
+let signer = null;
+let account = null;
+
+async function refreshPublicStats() {
+  // Public reads need no wallet and no login: use any BNB Chain RPC via ethers' default provider path.
+  // For production, replace this with a dedicated read-only RPC endpoint.
+  const readProvider = new ethers.JsonRpcProvider("https://bsc-dataseed2.binance.org");
+  if (!ethers.isAddress(CONFIG.contractAddress)) return; // not deployed yet
+  const roll = new ethers.Contract(CONFIG.contractAddress, ROLL_CALL_ABI, readProvider);
+  $("totalCheckIns").textContent = (await roll.totalCheckIns()).toString();
+  $("uniqueAgents").textContent = (await roll.uniqueAgents()).toString();
+  $("contractAddr").textContent = CONFIG.contractAddress;
+}
+
+async function refreshMyStats() {
+  if (!provider || !account) return;
+  const roll = new ethers.Contract(CONFIG.contractAddress, ROLL_CALL_ABI, provider);
+  const s = await roll.getStats(account);
+  $("myIsHolder").textContent = s.isHolder ? "yes" : "no";
+  $("myCount").textContent = s.checkInCount.toString();
+  $("myStreak").textContent = s.streak.toString();
+  $("myBest").textContent = s.bestStreak.toString();
+  $("myToday").textContent = s.checkedInToday ? "yes" : "no";
+  // Only an Agent ID holder who has not yet checked in today can check in.
+  $("checkInBtn").disabled = !(s.isHolder && !s.checkedInToday);
+  if (!s.isHolder) status("This address does not hold an Agent ID, so it cannot check in.");
+}
+
+$("connectBtn").addEventListener("click", async () => {
+  try {
+    // Injected-wallet flow only. There is deliberately NO QR-code login,
+    // NO pairing code, and NO server-side session anywhere in this page.
+    if (!window.ethereum) {
+      status("No injected wallet found. Open this page inside your wallet's browser, or use a browser with your wallet extension, then try again.");
+      return;
+    }
+    provider = new ethers.BrowserProvider(window.ethereum);
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== CONFIG.chainId) {
+      // Ask the wallet to switch; the user confirms or rejects in their own wallet.
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x" + CONFIG.chainId.toString(16) }]
+      });
+      provider = new ethers.BrowserProvider(window.ethereum);
+    }
+    signer = await provider.getSigner(); // triggers the wallet's own connect prompt
+    account = await signer.getAddress();
+    $("myAddress").textContent = account;
+    status("Connected with your own wallet. Nothing has been signed or sent.");
+    await refreshMyStats();
+  } catch (e) {
+    status("Connect cancelled or failed: " + (e.shortMessage || e.message || e));
+  }
+});
+
+$("checkInBtn").addEventListener("click", async () => {
+  try {
+    if (!signer) { status("Connect your wallet first."); return; }
+    const roll = new ethers.Contract(CONFIG.contractAddress, ROLL_CALL_ABI, signer);
+    status("Preparing your check-in. Review and confirm it in your own wallet — this page cannot confirm it for you.");
+    // This is the ONLY transaction this page ever requests: a checkIn() call.
+    // It transfers nothing, approves nothing, and is non-payable.
+    const tx = await roll.checkIn();
+    status("Transaction sent: " + tx.hash + "\nWaiting for confirmation…");
+    await tx.wait();
+    status("Checked in. Transaction confirmed: " + tx.hash);
+    await refreshPublicStats();
+    await refreshMyStats();
+  } catch (e) {
+    status("Check-in cancelled or failed: " + (e.shortMessage || e.message || e));
+  }
+});
+
+refreshPublicStats().catch(() => {});
+</script>
+</body>
+</html>
